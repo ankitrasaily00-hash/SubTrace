@@ -1,5 +1,6 @@
 import argparse
-import socket
+import dns.resolver
+import dns.exception
 
 
 WORDLIST = "subdomains.txt"
@@ -32,6 +33,44 @@ def load_subdomains(wordlist):
         return []
 
 
+def resolve_dns(hostname):
+    records = []
+
+    try:
+        answers = dns.resolver.resolve(hostname, "A")
+
+        for answer in answers:
+            records.append(
+                ("A", str(answer))
+            )
+
+    except (
+        dns.resolver.NXDOMAIN,
+        dns.resolver.NoAnswer,
+        dns.resolver.NoNameservers,
+        dns.exception.Timeout,
+    ):
+        pass
+
+    try:
+        answers = dns.resolver.resolve(hostname, "CNAME")
+
+        for answer in answers:
+            records.append(
+                ("CNAME", str(answer))
+            )
+
+    except (
+        dns.resolver.NXDOMAIN,
+        dns.resolver.NoAnswer,
+        dns.resolver.NoNameservers,
+        dns.exception.Timeout,
+    ):
+        pass
+
+    return records
+
+
 def find_subdomains(domain, wordlist):
     subdomains = load_subdomains(wordlist)
     found = []
@@ -42,17 +81,16 @@ def find_subdomains(domain, wordlist):
     for subdomain in subdomains:
         hostname = f"{subdomain}.{domain}"
 
-        try:
-            ip_address = socket.gethostbyname(hostname)
+        records = resolve_dns(hostname)
 
-            found.append((hostname, ip_address))
+        if records:
+            found.append((hostname, records))
 
-            print(
-                f"[+] {hostname:<35} -> {ip_address}"
-            )
-
-        except socket.gaierror:
-            pass
+            for record_type, value in records:
+                print(
+                    f"[+] {hostname:<35} "
+                    f"{record_type:<6} -> {value}"
+                )
 
     print("\n[*] Scan complete")
     print(f"[*] Found: {len(found)}")
@@ -63,8 +101,14 @@ def find_subdomains(domain, wordlist):
 def save_results(results, output_file):
     try:
         with open(output_file, "w") as file:
-            for hostname, ip_address in results:
-                file.write(f"{hostname} -> {ip_address}\n")
+
+            for hostname, records in results:
+
+                for record_type, value in records:
+                    file.write(
+                        f"{hostname} "
+                        f"{record_type} -> {value}\n"
+                    )
 
         print(f"[*] Results saved to: {output_file}")
 
@@ -115,7 +159,10 @@ def main():
     )
 
     if args.output and results:
-        save_results(results, args.output)
+        save_results(
+            results,
+            args.output
+        )
 
 
 if __name__ == "__main__":
