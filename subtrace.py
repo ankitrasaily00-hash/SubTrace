@@ -1,5 +1,5 @@
+import argparse
 import socket
-import sys
 
 
 WORDLIST = "subdomains.txt"
@@ -18,9 +18,9 @@ BANNER = r"""
 """
 
 
-def load_subdomains():
+def load_subdomains(wordlist):
     try:
-        with open(WORDLIST, "r") as file:
+        with open(wordlist, "r") as file:
             return [
                 line.strip()
                 for line in file
@@ -28,12 +28,12 @@ def load_subdomains():
             ]
 
     except FileNotFoundError:
-        print(f"[-] Wordlist not found: {WORDLIST}")
-        sys.exit(1)
+        print(f"[-] Wordlist not found: {wordlist}")
+        return []
 
 
-def find_subdomains(domain):
-    subdomains = load_subdomains()
+def find_subdomains(domain, wordlist):
+    subdomains = load_subdomains(wordlist)
     found = []
 
     print(f"[*] Target: {domain}")
@@ -48,7 +48,7 @@ def find_subdomains(domain):
             found.append((hostname, ip_address))
 
             print(
-                f"[+] {hostname:<30} -> {ip_address}"
+                f"[+] {hostname:<35} -> {ip_address}"
             )
 
         except socket.gaierror:
@@ -60,17 +60,44 @@ def find_subdomains(domain):
     return found
 
 
+def save_results(results, output_file):
+    try:
+        with open(output_file, "w") as file:
+            for hostname, ip_address in results:
+                file.write(f"{hostname} -> {ip_address}\n")
+
+        print(f"[*] Results saved to: {output_file}")
+
+    except OSError as error:
+        print(f"[-] Could not save results: {error}")
+
+
 def main():
-    print(BANNER)
+    parser = argparse.ArgumentParser(
+        description="SubTrace - Lightweight subdomain discovery tool"
+    )
 
-    if len(sys.argv) != 2:
-        print("Usage:")
-        print("  python subtrace.py <domain>")
-        print("\nExample:")
-        print("  python subtrace.py example.com")
-        sys.exit(1)
+    parser.add_argument(
+        "domain",
+        help="Target domain"
+    )
 
-    domain = sys.argv[1].strip()
+    parser.add_argument(
+        "-w",
+        "--wordlist",
+        default=WORDLIST,
+        help=f"Subdomain wordlist (default: {WORDLIST})"
+    )
+
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Save discovered subdomains to a file"
+    )
+
+    args = parser.parse_args()
+
+    domain = args.domain.strip()
 
     if domain.startswith("http://"):
         domain = domain[7:]
@@ -80,7 +107,15 @@ def main():
 
     domain = domain.rstrip("/")
 
-    find_subdomains(domain)
+    print(BANNER)
+
+    results = find_subdomains(
+        domain,
+        args.wordlist
+    )
+
+    if args.output and results:
+        save_results(results, args.output)
 
 
 if __name__ == "__main__":
