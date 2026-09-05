@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dns.exception
@@ -30,7 +31,7 @@ BANNER = r"""
 
 def load_subdomains(wordlist):
     try:
-        with open(wordlist, "r") as file:
+        with open(wordlist, "r", encoding="utf-8") as file:
             return [
                 line.strip()
                 for line in file
@@ -115,14 +116,20 @@ def check_http(hostname):
     ]
 
     for url in urls:
+        start_time = time.perf_counter()
+
         try:
             response = requests.get(
                 url,
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={
-                    "User-Agent": "SubTrace/7.0"
+                    "User-Agent": "SubTrace/8.0"
                 }
+            )
+
+            response_time = (
+                time.perf_counter() - start_time
             )
 
             return {
@@ -134,6 +141,10 @@ def check_http(hostname):
                 "server": response.headers.get(
                     "Server",
                     "Unknown"
+                ),
+                "response_time": round(
+                    response_time,
+                    3
                 )
             }
 
@@ -166,8 +177,12 @@ def find_subdomains(domain, wordlist, workers):
     subdomains = load_subdomains(wordlist)
 
     found = []
+
     record_count = 0
     web_count = 0
+    status_2xx = 0
+    status_3xx = 0
+    status_4xx_5xx = 0
 
     if not subdomains:
         return found
@@ -179,7 +194,11 @@ def find_subdomains(domain, wordlist, workers):
         f"[*] DNS Records: "
         f"{', '.join(RECORD_TYPES)}"
     )
-    print("[*] HTTP Detection: HTTPS + HTTP\n")
+    print("[*] HTTP Detection: HTTPS + HTTP")
+    print("[*] Timeout: 5 seconds\n")
+
+    completed = 0
+    total = len(subdomains)
 
     with ThreadPoolExecutor(
         max_workers=workers
@@ -195,8 +214,16 @@ def find_subdomains(domain, wordlist, workers):
         ]
 
         for task in as_completed(tasks):
+            completed += 1
+
             hostname, records, http_info = (
                 task.result()
+            )
+
+            print(
+                f"[*] Progress: "
+                f"{completed}/{total}",
+                end="\r"
             )
 
             if not records:
@@ -210,7 +237,12 @@ def find_subdomains(domain, wordlist, workers):
 
             found.append(result)
 
-            print(f"\n[+] {hostname}")
+            print(
+                " " * 60,
+                end="\r"
+            )
+
+            print(f"[+] {hostname}")
 
             for record in records:
                 record_count += 1
@@ -223,9 +255,20 @@ def find_subdomains(domain, wordlist, workers):
             if http_info:
                 web_count += 1
 
+                status = http_info["status"]
+
+                if 200 <= status < 300:
+                    status_2xx += 1
+
+                elif 300 <= status < 400:
+                    status_3xx += 1
+
+                elif status >= 400:
+                    status_4xx_5xx += 1
+
                 print(
                     f"    HTTP   -> "
-                    f"{http_info['status']} "
+                    f"{status} "
                     f"{http_info['url']}"
                 )
 
@@ -239,6 +282,11 @@ def find_subdomains(domain, wordlist, workers):
                     f"{http_info['server']}"
                 )
 
+                print(
+                    f"    Time   -> "
+                    f"{http_info['response_time']}s"
+                )
+
             else:
                 print(
                     "    HTTP   -> "
@@ -247,16 +295,22 @@ def find_subdomains(domain, wordlist, workers):
 
     print("\n[*] Scan complete")
     print(
-        f"[*] Subdomains found: "
-        f"{len(found)}"
+        f"    Subdomains  : {len(found)}"
     )
     print(
-        f"[*] DNS records found: "
-        f"{record_count}"
+        f"    DNS records : {record_count}"
     )
     print(
-        f"[*] Web services found: "
-        f"{web_count}"
+        f"    Web services: {web_count}"
+    )
+    print(
+        f"    HTTP 2xx    : {status_2xx}"
+    )
+    print(
+        f"    HTTP 3xx    : {status_3xx}"
+    )
+    print(
+        f"    HTTP 4xx/5xx: {status_4xx_5xx}"
     )
 
     return found
@@ -299,6 +353,11 @@ def save_text(results, output_file):
                     file.write(
                         f"    Server -> "
                         f"{http_info['server']}\n"
+                    )
+
+                    file.write(
+                        f"    Time -> "
+                        f"{http_info['response_time']}s\n"
                     )
 
                 else:
@@ -366,7 +425,8 @@ def save_csv(results, output_file):
                     "HTTP Status",
                     "URL",
                     "Title",
-                    "Server"
+                    "Server",
+                    "Response Time"
                 ]
             )
 
@@ -374,29 +434,20 @@ def save_csv(results, output_file):
 
                 http_info = result["http"]
 
-                http_status = (
-                    http_info["status"]
-                    if http_info
-                    else ""
-                )
-
-                url = (
-                    http_info["url"]
-                    if http_info
-                    else ""
-                )
-
-                title = (
-                    http_info["title"]
-                    if http_info
-                    else ""
-                )
-
-                server = (
-                    http_info["server"]
-                    if http_info
-                    else ""
-                )
+                if http_info:
+                    http_status = http_info["status"]
+                    url = http_info["url"]
+                    title = http_info["title"]
+                    server = http_info["server"]
+                    response_time = (
+                        http_info["response_time"]
+                    )
+                else:
+                    http_status = ""
+                    url = ""
+                    title = ""
+                    server = ""
+                    response_time = ""
 
                 for record in result["dns_records"]:
 
@@ -408,7 +459,8 @@ def save_csv(results, output_file):
                             http_status,
                             url,
                             title,
-                            server
+                            server,
+                            response_time
                         ]
                     )
 
