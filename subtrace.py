@@ -1,6 +1,8 @@
 import argparse
 import csv
 import json
+import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -9,11 +11,19 @@ import dns.resolver
 import requests
 
 
+VERSION = "9.0.0"
+
 WORDLIST = "subdomains.txt"
 DEFAULT_WORKERS = 10
 REQUEST_TIMEOUT = 5
 
-RECORD_TYPES = ["A", "CNAME", "MX", "NS", "TXT"]
+RECORD_TYPES = [
+    "A",
+    "CNAME",
+    "MX",
+    "NS",
+    "TXT",
+]
 
 
 BANNER = r"""
@@ -30,20 +40,31 @@ BANNER = r"""
 
 
 def load_subdomains(wordlist):
+    """Load subdomain prefixes from the wordlist."""
+
     try:
-        with open(wordlist, "r", encoding="utf-8") as file:
+        with open(
+            wordlist,
+            "r",
+            encoding="utf-8"
+        ) as file:
             return [
                 line.strip()
                 for line in file
                 if line.strip()
+                and not line.strip().startswith("#")
             ]
 
     except FileNotFoundError:
-        print(f"[-] Wordlist not found: {wordlist}")
+        print(
+            f"[-] Wordlist not found: {wordlist}"
+        )
         return []
 
 
 def resolve_record(hostname, record_type):
+    """Resolve one DNS record type."""
+
     records = []
 
     try:
@@ -72,6 +93,8 @@ def resolve_record(hostname, record_type):
 
 
 def resolve_dns(hostname):
+    """Resolve all configured DNS record types."""
+
     records = []
 
     for record_type in RECORD_TYPES:
@@ -86,30 +109,32 @@ def resolve_dns(hostname):
 
 
 def extract_title(text):
+    """Extract and clean the HTML page title."""
+
     if not text:
         return "N/A"
 
-    lower_text = text.lower()
-
-    start = lower_text.find("<title>")
-
-    if start == -1:
-        return "N/A"
-
-    end = lower_text.find(
-        "</title>",
-        start
+    match = re.search(
+        r"<title[^>]*>(.*?)</title>",
+        text,
+        re.IGNORECASE | re.DOTALL
     )
 
-    if end == -1:
+    if not match:
         return "N/A"
 
-    title = text[start + 7:end].strip()
+    title = re.sub(
+        r"\s+",
+        " ",
+        match.group(1)
+    ).strip()
 
     return title if title else "N/A"
 
 
 def check_http(hostname):
+    """Check HTTPS first, then HTTP."""
+
     urls = [
         f"https://{hostname}",
         f"http://{hostname}"
@@ -124,7 +149,9 @@ def check_http(hostname):
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={
-                    "User-Agent": "SubTrace/8.0"
+                    "User-Agent": (
+                        f"SubTrace/{VERSION}"
+                    )
                 }
             )
 
@@ -155,6 +182,8 @@ def check_http(hostname):
 
 
 def scan_subdomain(domain, subdomain):
+    """Resolve DNS and check HTTP for one subdomain."""
+
     hostname = f"{subdomain}.{domain}"
 
     try:
@@ -165,7 +194,9 @@ def scan_subdomain(domain, subdomain):
         if not records:
             return hostname, [], None
 
-        http_info = check_http(hostname)
+        http_info = check_http(
+            hostname
+        )
 
         return hostname, records, http_info
 
@@ -173,29 +204,109 @@ def scan_subdomain(domain, subdomain):
         return hostname, [], None
 
 
-def find_subdomains(domain, wordlist, workers):
-    subdomains = load_subdomains(wordlist)
+def print_result(
+    hostname,
+    records,
+    http_info
+):
+    """Print one discovered subdomain."""
+
+    print(f"\n[+] {hostname}")
+
+    for record in records:
+        print(
+            f"    {record['type']:<6} "
+            f"-> {record['value']}"
+        )
+
+    if http_info:
+        print(
+            f"    HTTP   -> "
+            f"{http_info['status']} "
+            f"{http_info['url']}"
+        )
+
+        print(
+            f"    Title  -> "
+            f"{http_info['title']}"
+        )
+
+        print(
+            f"    Server -> "
+            f"{http_info['server']}"
+        )
+
+        print(
+            f"    Time   -> "
+            f"{http_info['response_time']}s"
+        )
+
+    else:
+        print(
+            "    HTTP   -> "
+            "No web service detected"
+        )
+
+
+def find_subdomains(
+    domain,
+    wordlist,
+    workers,
+    quiet=False
+):
+    """Scan subdomains using concurrent workers."""
+
+    subdomains = load_subdomains(
+        wordlist
+    )
 
     found = []
 
     record_count = 0
     web_count = 0
+
     status_2xx = 0
     status_3xx = 0
     status_4xx_5xx = 0
 
     if not subdomains:
-        return found
+        return {
+            "results": [],
+            "record_count": 0,
+            "web_count": 0,
+            "status_2xx": 0,
+            "status_3xx": 0,
+            "status_4xx_5xx": 0
+        }
 
-    print(f"[*] Target: {domain}")
-    print(f"[*] Wordlist: {len(subdomains)} entries")
-    print(f"[*] Workers: {workers}")
-    print(
-        f"[*] DNS Records: "
-        f"{', '.join(RECORD_TYPES)}"
-    )
-    print("[*] HTTP Detection: HTTPS + HTTP")
-    print("[*] Timeout: 5 seconds\n")
+    if not quiet:
+        print(
+            f"[*] Target: {domain}"
+        )
+
+        print(
+            f"[*] Wordlist: "
+            f"{len(subdomains)} entries"
+        )
+
+        print(
+            f"[*] Workers: {workers}"
+        )
+
+        print(
+            f"[*] DNS Records: "
+            f"{', '.join(RECORD_TYPES)}"
+        )
+
+        print(
+            "[*] HTTP Detection: "
+            "HTTPS + HTTP"
+        )
+
+        print(
+            f"[*] Timeout: "
+            f"{REQUEST_TIMEOUT} seconds\n"
+        )
 
     completed = 0
     total = len(subdomains)
@@ -220,11 +331,12 @@ def find_subdomains(domain, wordlist, workers):
                 task.result()
             )
 
-            print(
-                f"[*] Progress: "
-                f"{completed}/{total}",
-                end="\r"
-            )
+            if not quiet:
+                print(
+                    f"[*] Progress: "
+                    f"{completed}/{total}",
+                    end="\r"
+                )
 
             if not records:
                 continue
@@ -237,20 +349,7 @@ def find_subdomains(domain, wordlist, workers):
 
             found.append(result)
 
-            print(
-                " " * 60,
-                end="\r"
-            )
-
-            print(f"[+] {hostname}")
-
-            for record in records:
-                record_count += 1
-
-                print(
-                    f"    {record['type']:<6} "
-                    f"-> {record['value']}"
-                )
+            record_count += len(records)
 
             if http_info:
                 web_count += 1
@@ -266,57 +365,31 @@ def find_subdomains(domain, wordlist, workers):
                 elif status >= 400:
                     status_4xx_5xx += 1
 
+            if not quiet:
                 print(
-                    f"    HTTP   -> "
-                    f"{status} "
-                    f"{http_info['url']}"
+                    " " * 60,
+                    end="\r"
                 )
 
-                print(
-                    f"    Title  -> "
-                    f"{http_info['title']}"
+                print_result(
+                    hostname,
+                    records,
+                    http_info
                 )
 
-                print(
-                    f"    Server -> "
-                    f"{http_info['server']}"
-                )
-
-                print(
-                    f"    Time   -> "
-                    f"{http_info['response_time']}s"
-                )
-
-            else:
-                print(
-                    "    HTTP   -> "
-                    "No web service detected"
-                )
-
-    print("\n[*] Scan complete")
-    print(
-        f"    Subdomains  : {len(found)}"
-    )
-    print(
-        f"    DNS records : {record_count}"
-    )
-    print(
-        f"    Web services: {web_count}"
-    )
-    print(
-        f"    HTTP 2xx    : {status_2xx}"
-    )
-    print(
-        f"    HTTP 3xx    : {status_3xx}"
-    )
-    print(
-        f"    HTTP 4xx/5xx: {status_4xx_5xx}"
-    )
-
-    return found
+    return {
+        "results": found,
+        "record_count": record_count,
+        "web_count": web_count,
+        "status_2xx": status_2xx,
+        "status_3xx": status_3xx,
+        "status_4xx_5xx": status_4xx_5xx
+    }
 
 
 def save_text(results, output_file):
+    """Save results in human-readable TXT format."""
+
     try:
         with open(
             output_file,
@@ -330,7 +403,9 @@ def save_text(results, output_file):
                     f"{result['hostname']}\n"
                 )
 
-                for record in result["dns_records"]:
+                for record in result[
+                    "dns_records"
+                ]:
                     file.write(
                         f"    {record['type']} "
                         f"-> {record['value']}\n"
@@ -381,6 +456,8 @@ def save_text(results, output_file):
 
 
 def save_json(results, output_file):
+    """Save results as JSON."""
+
     try:
         with open(
             output_file,
@@ -407,6 +484,8 @@ def save_json(results, output_file):
 
 
 def save_csv(results, output_file):
+    """Save results as CSV."""
+
     try:
         with open(
             output_file,
@@ -435,28 +514,30 @@ def save_csv(results, output_file):
                 http_info = result["http"]
 
                 if http_info:
-                    http_status = http_info["status"]
+                    status = http_info["status"]
                     url = http_info["url"]
                     title = http_info["title"]
                     server = http_info["server"]
                     response_time = (
                         http_info["response_time"]
                     )
+
                 else:
-                    http_status = ""
+                    status = ""
                     url = ""
                     title = ""
                     server = ""
                     response_time = ""
 
-                for record in result["dns_records"]:
-
+                for record in result[
+                    "dns_records"
+                ]:
                     writer.writerow(
                         [
                             result["hostname"],
                             record["type"],
                             record["value"],
-                            http_status,
+                            status,
                             url,
                             title,
                             server,
@@ -476,7 +557,64 @@ def save_csv(results, output_file):
         )
 
 
+def print_summary(scan_data):
+    """Print final scan statistics."""
+
+    print("\n[*] Scan complete")
+
+    print(
+        f"    Subdomains  : "
+        f"{len(scan_data['results'])}"
+    )
+
+    print(
+        f"    DNS records : "
+        f"{scan_data['record_count']}"
+    )
+
+    print(
+        f"    Web services: "
+        f"{scan_data['web_count']}"
+    )
+
+    print(
+        f"    HTTP 2xx    : "
+        f"{scan_data['status_2xx']}"
+    )
+
+    print(
+        f"    HTTP 3xx    : "
+        f"{scan_data['status_3xx']}"
+    )
+
+    print(
+        f"    HTTP 4xx/5xx: "
+        f"{scan_data['status_4xx_5xx']}"
+    )
+
+
+def clean_domain(domain):
+    """Clean HTTP/HTTPS prefixes and trailing paths."""
+
+    domain = domain.strip()
+
+    domain = re.sub(
+        r"^https?://",
+        "",
+        domain,
+        flags=re.IGNORECASE
+    )
+
+    domain = domain.split("/")[0]
+
+    domain = domain.rstrip(".")
+
+    return domain
+
+
 def main():
+    """Main command-line interface."""
+
     parser = argparse.ArgumentParser(
         description=(
             "SubTrace - Lightweight DNS and "
@@ -529,6 +667,19 @@ def main():
         )
     )
 
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Show only the final summary"
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"SubTrace {VERSION}"
+    )
+
     args = parser.parse_args()
 
     if args.threads < 1:
@@ -536,42 +687,57 @@ def main():
             "threads must be at least 1"
         )
 
-    domain = args.domain.strip()
-
-    if domain.startswith("http://"):
-        domain = domain[7:]
-
-    elif domain.startswith("https://"):
-        domain = domain[8:]
-
-    domain = domain.rstrip("/")
-
-    print(BANNER)
-
-    results = find_subdomains(
-        domain,
-        args.wordlist,
-        args.threads
+    domain = clean_domain(
+        args.domain
     )
 
-    if args.output and results:
+    if not domain:
+        parser.error(
+            "a valid domain is required"
+        )
+
+    if not args.quiet:
+        print(BANNER)
+
+        print(
+            f"[*] SubTrace version: "
+            f"{VERSION}\n"
+        )
+
+    scan_data = find_subdomains(
+        domain,
+        args.wordlist,
+        args.threads,
+        args.quiet
+    )
+
+    # Always show the final summary.
+    # Quiet mode hides detailed results only.
+    print_summary(scan_data)
+
+    if args.output and scan_data["results"]:
         save_text(
-            results,
+            scan_data["results"],
             args.output
         )
 
-    if args.json and results:
+    if args.json and scan_data["results"]:
         save_json(
-            results,
+            scan_data["results"],
             args.json
         )
 
-    if args.csv and results:
+    if args.csv and scan_data["results"]:
         save_csv(
-            results,
+            scan_data["results"],
             args.csv
         )
 
+    if not scan_data["results"]:
+        return 1
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
