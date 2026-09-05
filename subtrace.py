@@ -1,3 +1,4 @@
+
 import argparse
 import csv
 import json
@@ -11,7 +12,7 @@ import dns.resolver
 import requests
 
 
-VERSION = "9.0.0"
+VERSION = "11.0.0"
 
 WORDLIST = "subdomains.txt"
 DEFAULT_WORKERS = 10
@@ -34,37 +35,37 @@ BANNER = r"""
  ____) | |_| | | | |
 |_____/ \__,_|_| |_|
 
-      SubTrace
-  DNS + HTTP Reconnaissance Tool
+       SubTrace
+ DNS + HTTP Reconnaissance Tool
 """
 
 
 def load_subdomains(wordlist):
     """Load subdomain prefixes from the wordlist."""
-
     try:
-        with open(
-            wordlist,
-            "r",
-            encoding="utf-8"
-        ) as file:
-            return [
-                line.strip()
-                for line in file
-                if line.strip()
-                and not line.strip().startswith("#")
-            ]
+        with open(wordlist, "r", encoding="utf-8") as file:
+            subdomains = []
+
+            for line in file:
+                value = line.strip()
+
+                if not value:
+                    continue
+
+                if value.startswith("#"):
+                    continue
+
+                subdomains.append(value)
+
+            return list(dict.fromkeys(subdomains))
 
     except FileNotFoundError:
-        print(
-            f"[-] Wordlist not found: {wordlist}"
-        )
+        print(f"[-] Wordlist not found: {wordlist}")
         return []
 
 
 def resolve_record(hostname, record_type):
     """Resolve one DNS record type."""
-
     records = []
 
     try:
@@ -86,7 +87,11 @@ def resolve_record(hostname, record_type):
         dns.resolver.NoAnswer,
         dns.resolver.NoNameservers,
         dns.exception.Timeout,
+        dns.resolver.NoResolver,
     ):
+        pass
+
+    except Exception:
         pass
 
     return records
@@ -94,7 +99,6 @@ def resolve_record(hostname, record_type):
 
 def resolve_dns(hostname):
     """Resolve all configured DNS record types."""
-
     records = []
 
     for record_type in RECORD_TYPES:
@@ -108,9 +112,79 @@ def resolve_dns(hostname):
     return hostname, records
 
 
+def resolve_a_records(hostname):
+    """Resolve A records for wildcard DNS detection."""
+    records = []
+
+    try:
+        answers = dns.resolver.resolve(
+            hostname,
+            "A"
+        )
+
+        for answer in answers:
+            records.append(str(answer))
+
+    except Exception:
+        pass
+
+    return sorted(set(records))
+
+
+def generate_random_hostname(domain):
+    """Generate a random hostname for wildcard testing."""
+    timestamp = str(time.time_ns())
+
+    suffix = re.sub(
+        r"[^a-z0-9]",
+        "",
+        timestamp.lower()
+    )
+
+    return f"subtrace-{suffix}.{domain}"
+
+
+def detect_wildcard_dns(domain):
+    """
+    Detect basic wildcard A-record behavior.
+
+    Random hostnames are queried several times.
+    If they unexpectedly resolve to the same addresses,
+    those addresses are treated as possible wildcard DNS.
+    """
+    wildcard_addresses = []
+
+    for _ in range(3):
+        hostname = generate_random_hostname(domain)
+        addresses = resolve_a_records(hostname)
+
+        if addresses:
+            wildcard_addresses.extend(addresses)
+
+    return sorted(set(wildcard_addresses))
+
+
+def is_wildcard_match(records, wildcard_addresses):
+    """Check whether an A-record response matches wildcard DNS."""
+    if not wildcard_addresses:
+        return False
+
+    a_records = sorted(
+        {
+            record["value"]
+            for record in records
+            if record["type"] == "A"
+        }
+    )
+
+    if not a_records:
+        return False
+
+    return a_records == sorted(set(wildcard_addresses))
+
+
 def extract_title(text):
     """Extract and clean the HTML page title."""
-
     if not text:
         return "N/A"
 
@@ -134,10 +208,9 @@ def extract_title(text):
 
 def check_http(hostname):
     """Check HTTPS first, then HTTP."""
-
     urls = [
         f"https://{hostname}",
-        f"http://{hostname}"
+        f"http://{hostname}",
     ]
 
     for url in urls:
@@ -149,9 +222,7 @@ def check_http(hostname):
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={
-                    "User-Agent": (
-                        f"SubTrace/{VERSION}"
-                    )
+                    "User-Agent": f"SubTrace/{VERSION}"
                 }
             )
 
@@ -162,9 +233,7 @@ def check_http(hostname):
             return {
                 "url": response.url,
                 "status": response.status_code,
-                "title": extract_title(
-                    response.text
-                ),
+                "title": extract_title(response.text),
                 "server": response.headers.get(
                     "Server",
                     "Unknown"
@@ -172,7 +241,7 @@ def check_http(hostname):
                 "response_time": round(
                     response_time,
                     3
-                )
+                ),
             }
 
         except requests.RequestException:
@@ -181,37 +250,61 @@ def check_http(hostname):
     return None
 
 
-def scan_subdomain(domain, subdomain):
+def scan_subdomain(
+    domain,
+    subdomain,
+    wildcard_addresses
+):
     """Resolve DNS and check HTTP for one subdomain."""
-
     hostname = f"{subdomain}.{domain}"
 
     try:
-        hostname, records = resolve_dns(
-            hostname
-        )
+        hostname, records = resolve_dns(hostname)
 
         if not records:
-            return hostname, [], None
+            return {
+                "hostname": hostname,
+                "dns_records": [],
+                "http": None,
+                "wildcard": False,
+            }
 
-        http_info = check_http(
-            hostname
+        wildcard = is_wildcard_match(
+            records,
+            wildcard_addresses
         )
 
-        return hostname, records, http_info
+        http_info = check_http(hostname)
+
+        return {
+            "hostname": hostname,
+            "dns_records": records,
+            "http": http_info,
+            "wildcard": wildcard,
+        }
 
     except Exception:
-        return hostname, [], None
+        return {
+            "hostname": hostname,
+            "dns_records": [],
+            "http": None,
+            "wildcard": False,
+        }
 
 
-def print_result(
-    hostname,
-    records,
-    http_info
-):
+def print_result(result):
     """Print one discovered subdomain."""
+    hostname = result["hostname"]
+    records = result["dns_records"]
+    http_info = result["http"]
+    wildcard = result["wildcard"]
 
     print(f"\n[+] {hostname}")
+
+    if wildcard:
+        print(
+            "    DNS    -> Possible wildcard match"
+        )
 
     for record in records:
         print(
@@ -254,11 +347,8 @@ def find_subdomains(
     workers,
     quiet=False
 ):
-    """Scan subdomains using concurrent workers."""
-
-    subdomains = load_subdomains(
-        wordlist
-    )
+    """Scan subdomains concurrently."""
+    subdomains = load_subdomains(wordlist)
 
     found = []
 
@@ -269,6 +359,8 @@ def find_subdomains(
     status_3xx = 0
     status_4xx_5xx = 0
 
+    wildcard_count = 0
+
     if not subdomains:
         return {
             "results": [],
@@ -276,37 +368,45 @@ def find_subdomains(
             "web_count": 0,
             "status_2xx": 0,
             "status_3xx": 0,
-            "status_4xx_5xx": 0
+            "status_4xx_5xx": 0,
+            "wildcard_count": 0,
+            "wildcard_addresses": [],
         }
 
-    if not quiet:
-        print(
-            f"[*] Target: {domain}"
-        )
+    wildcard_addresses = detect_wildcard_dns(domain)
 
+    if not quiet:
+        print(f"[*] Target: {domain}")
         print(
             f"[*] Wordlist: "
             f"{len(subdomains)} entries"
         )
-
-        print(
-            f"[*] Workers: {workers}"
-        )
-
+        print(f"[*] Workers: {workers}")
         print(
             f"[*] DNS Records: "
             f"{', '.join(RECORD_TYPES)}"
         )
-
         print(
             "[*] HTTP Detection: "
             "HTTPS + HTTP"
         )
-
         print(
             f"[*] Timeout: "
-            f"{REQUEST_TIMEOUT} seconds\n"
+            f"{REQUEST_TIMEOUT} seconds"
         )
+
+        if wildcard_addresses:
+            print(
+                "[*] Wildcard DNS: "
+                f"Detected ({', '.join(wildcard_addresses)})"
+            )
+        else:
+            print(
+                "[*] Wildcard DNS: "
+                "Not detected"
+            )
+
+        print()
 
     completed = 0
     total = len(subdomains)
@@ -319,7 +419,8 @@ def find_subdomains(
             executor.submit(
                 scan_subdomain,
                 domain,
-                subdomain
+                subdomain,
+                wildcard_addresses
             )
             for subdomain in subdomains
         ]
@@ -327,9 +428,10 @@ def find_subdomains(
         for task in as_completed(tasks):
             completed += 1
 
-            hostname, records, http_info = (
-                task.result()
-            )
+            try:
+                result = task.result()
+            except Exception:
+                continue
 
             if not quiet:
                 print(
@@ -338,18 +440,19 @@ def find_subdomains(
                     end="\r"
                 )
 
-            if not records:
+            if not result["dns_records"]:
                 continue
-
-            result = {
-                "hostname": hostname,
-                "dns_records": records,
-                "http": http_info
-            }
 
             found.append(result)
 
-            record_count += len(records)
+            record_count += len(
+                result["dns_records"]
+            )
+
+            if result["wildcard"]:
+                wildcard_count += 1
+
+            http_info = result["http"]
 
             if http_info:
                 web_count += 1
@@ -367,15 +470,15 @@ def find_subdomains(
 
             if not quiet:
                 print(
-                    " " * 60,
+                    " " * 70,
                     end="\r"
                 )
 
-                print_result(
-                    hostname,
-                    records,
-                    http_info
-                )
+                print_result(result)
+
+    found.sort(
+        key=lambda item: item["hostname"]
+    )
 
     return {
         "results": found,
@@ -383,13 +486,14 @@ def find_subdomains(
         "web_count": web_count,
         "status_2xx": status_2xx,
         "status_3xx": status_3xx,
-        "status_4xx_5xx": status_4xx_5xx
+        "status_4xx_5xx": status_4xx_5xx,
+        "wildcard_count": wildcard_count,
+        "wildcard_addresses": wildcard_addresses,
     }
 
 
 def save_text(results, output_file):
     """Save results in human-readable TXT format."""
-
     try:
         with open(
             output_file,
@@ -398,14 +502,17 @@ def save_text(results, output_file):
         ) as file:
 
             for result in results:
-
                 file.write(
                     f"{result['hostname']}\n"
                 )
 
-                for record in result[
-                    "dns_records"
-                ]:
+                if result["wildcard"]:
+                    file.write(
+                        "    DNS -> "
+                        "Possible wildcard match\n"
+                    )
+
+                for record in result["dns_records"]:
                     file.write(
                         f"    {record['type']} "
                         f"-> {record['value']}\n"
@@ -457,7 +564,6 @@ def save_text(results, output_file):
 
 def save_json(results, output_file):
     """Save results as JSON."""
-
     try:
         with open(
             output_file,
@@ -485,7 +591,6 @@ def save_json(results, output_file):
 
 def save_csv(results, output_file):
     """Save results as CSV."""
-
     try:
         with open(
             output_file,
@@ -499,18 +604,18 @@ def save_csv(results, output_file):
             writer.writerow(
                 [
                     "Hostname",
+                    "Wildcard",
                     "Record Type",
                     "Record Value",
                     "HTTP Status",
                     "URL",
                     "Title",
                     "Server",
-                    "Response Time"
+                    "Response Time",
                 ]
             )
 
             for result in results:
-
                 http_info = result["http"]
 
                 if http_info:
@@ -529,19 +634,18 @@ def save_csv(results, output_file):
                     server = ""
                     response_time = ""
 
-                for record in result[
-                    "dns_records"
-                ]:
+                for record in result["dns_records"]:
                     writer.writerow(
                         [
                             result["hostname"],
+                            result["wildcard"],
                             record["type"],
                             record["value"],
                             status,
                             url,
                             title,
                             server,
-                            response_time
+                            response_time,
                         ]
                     )
 
@@ -559,7 +663,6 @@ def save_csv(results, output_file):
 
 def print_summary(scan_data):
     """Print final scan statistics."""
-
     print("\n[*] Scan complete")
 
     print(
@@ -592,10 +695,14 @@ def print_summary(scan_data):
         f"{scan_data['status_4xx_5xx']}"
     )
 
+    print(
+        f"    Wildcard    : "
+        f"{scan_data['wildcard_count']}"
+    )
+
 
 def clean_domain(domain):
-    """Clean HTTP/HTTPS prefixes and trailing paths."""
-
+    """Clean HTTP/HTTPS prefixes and paths."""
     domain = domain.strip()
 
     domain = re.sub(
@@ -606,15 +713,13 @@ def clean_domain(domain):
     )
 
     domain = domain.split("/")[0]
-
     domain = domain.rstrip(".")
 
-    return domain
+    return domain.lower()
 
 
 def main():
     """Main command-line interface."""
-
     parser = argparse.ArgumentParser(
         description=(
             "SubTrace - Lightweight DNS and "
@@ -687,9 +792,7 @@ def main():
             "threads must be at least 1"
         )
 
-    domain = clean_domain(
-        args.domain
-    )
+    domain = clean_domain(args.domain)
 
     if not domain:
         parser.error(
@@ -711,23 +814,21 @@ def main():
         args.quiet
     )
 
-    # Always show the final summary.
-    # Quiet mode hides detailed results only.
     print_summary(scan_data)
 
-    if args.output and scan_data["results"]:
+    if args.output:
         save_text(
             scan_data["results"],
             args.output
         )
 
-    if args.json and scan_data["results"]:
+    if args.json:
         save_json(
             scan_data["results"],
             args.json
         )
 
-    if args.csv and scan_data["results"]:
+    if args.csv:
         save_csv(
             scan_data["results"],
             args.csv
@@ -741,3 +842,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
