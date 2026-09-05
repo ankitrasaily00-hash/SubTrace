@@ -1,9 +1,14 @@
+
 import argparse
-import dns.resolver
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import dns.exception
+import dns.resolver
 
 
 WORDLIST = "subdomains.txt"
+DEFAULT_WORKERS = 10
 
 
 BANNER = r"""
@@ -40,9 +45,7 @@ def resolve_dns(hostname):
         answers = dns.resolver.resolve(hostname, "A")
 
         for answer in answers:
-            records.append(
-                ("A", str(answer))
-            )
+            records.append(("A", str(answer)))
 
     except (
         dns.resolver.NXDOMAIN,
@@ -56,9 +59,7 @@ def resolve_dns(hostname):
         answers = dns.resolver.resolve(hostname, "CNAME")
 
         for answer in answers:
-            records.append(
-                ("CNAME", str(answer))
-            )
+            records.append(("CNAME", str(answer)))
 
     except (
         dns.resolver.NXDOMAIN,
@@ -68,32 +69,58 @@ def resolve_dns(hostname):
     ):
         pass
 
-    return records
+    return hostname, records
 
 
-def find_subdomains(domain, wordlist):
+def scan_subdomain(domain, subdomain):
+    hostname = f"{subdomain}.{domain}"
+
+    try:
+        return resolve_dns(hostname)
+
+    except Exception:
+        return hostname, []
+
+
+def find_subdomains(domain, wordlist, workers):
     subdomains = load_subdomains(wordlist)
     found = []
+    record_count = 0
+
+    if not subdomains:
+        return found
 
     print(f"[*] Target: {domain}")
-    print(f"[*] Wordlist: {len(subdomains)} entries\n")
+    print(f"[*] Wordlist: {len(subdomains)} entries")
+    print(f"[*] Workers: {workers}\n")
 
-    for subdomain in subdomains:
-        hostname = f"{subdomain}.{domain}"
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        tasks = [
+            executor.submit(
+                scan_subdomain,
+                domain,
+                subdomain
+            )
+            for subdomain in subdomains
+        ]
 
-        records = resolve_dns(hostname)
+        for task in as_completed(tasks):
+            hostname, records = task.result()
 
-        if records:
-            found.append((hostname, records))
+            if records:
+                found.append((hostname, records))
 
-            for record_type, value in records:
-                print(
-                    f"[+] {hostname:<35} "
-                    f"{record_type:<6} -> {value}"
-                )
+                for record_type, value in records:
+                    record_count += 1
+
+                    print(
+                        f"[+] {hostname:<35} "
+                        f"{record_type:<6} -> {value}"
+                    )
 
     print("\n[*] Scan complete")
-    print(f"[*] Found: {len(found)}")
+    print(f"[*] Subdomains found: {len(found)}")
+    print(f"[*] DNS records found: {record_count}")
 
     return found
 
@@ -101,9 +128,7 @@ def find_subdomains(domain, wordlist):
 def save_results(results, output_file):
     try:
         with open(output_file, "w") as file:
-
             for hostname, records in results:
-
                 for record_type, value in records:
                     file.write(
                         f"{hostname} "
@@ -139,7 +164,18 @@ def main():
         help="Save discovered subdomains to a file"
     )
 
+    parser.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of concurrent DNS lookups (default: {DEFAULT_WORKERS})"
+    )
+
     args = parser.parse_args()
+
+    if args.threads < 1:
+        parser.error("threads must be at least 1")
 
     domain = args.domain.strip()
 
@@ -155,7 +191,8 @@ def main():
 
     results = find_subdomains(
         domain,
-        args.wordlist
+        args.wordlist,
+        args.threads
     )
 
     if args.output and results:
@@ -167,3 +204,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
