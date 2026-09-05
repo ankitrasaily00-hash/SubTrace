@@ -1,4 +1,6 @@
 import argparse
+import csv
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dns.exception
@@ -51,7 +53,10 @@ def resolve_record(hostname, record_type):
 
         for answer in answers:
             records.append(
-                (record_type, str(answer))
+                {
+                    "type": record_type,
+                    "value": str(answer)
+                }
             )
 
     except (
@@ -79,6 +84,30 @@ def resolve_dns(hostname):
     return hostname, records
 
 
+def extract_title(text):
+    if not text:
+        return "N/A"
+
+    lower_text = text.lower()
+
+    start = lower_text.find("<title>")
+
+    if start == -1:
+        return "N/A"
+
+    end = lower_text.find(
+        "</title>",
+        start
+    )
+
+    if end == -1:
+        return "N/A"
+
+    title = text[start + 7:end].strip()
+
+    return title if title else "N/A"
+
+
 def check_http(hostname):
     urls = [
         f"https://{hostname}",
@@ -92,38 +121,20 @@ def check_http(hostname):
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={
-                    "User-Agent": "SubTrace/6.0"
+                    "User-Agent": "SubTrace/7.0"
                 }
             )
-
-            server = response.headers.get(
-                "Server",
-                "Unknown"
-            )
-
-            title = "N/A"
-
-            if response.text:
-                lower_text = response.text.lower()
-
-                start = lower_text.find("<title>")
-
-                if start != -1:
-                    end = lower_text.find(
-                        "</title>",
-                        start
-                    )
-
-                    if end != -1:
-                        title = response.text[
-                            start + 7:end
-                        ].strip()
 
             return {
                 "url": response.url,
                 "status": response.status_code,
-                "title": title,
-                "server": server
+                "title": extract_title(
+                    response.text
+                ),
+                "server": response.headers.get(
+                    "Server",
+                    "Unknown"
+                )
             }
 
         except requests.RequestException:
@@ -156,7 +167,7 @@ def find_subdomains(domain, wordlist, workers):
 
     found = []
     record_count = 0
-    http_count = 0
+    web_count = 0
 
     if not subdomains:
         return found
@@ -164,7 +175,10 @@ def find_subdomains(domain, wordlist, workers):
     print(f"[*] Target: {domain}")
     print(f"[*] Wordlist: {len(subdomains)} entries")
     print(f"[*] Workers: {workers}")
-    print(f"[*] DNS Records: {', '.join(RECORD_TYPES)}")
+    print(
+        f"[*] DNS Records: "
+        f"{', '.join(RECORD_TYPES)}"
+    )
     print("[*] HTTP Detection: HTTPS + HTTP\n")
 
     with ThreadPoolExecutor(
@@ -188,21 +202,26 @@ def find_subdomains(domain, wordlist, workers):
             if not records:
                 continue
 
-            found.append(
-                (hostname, records, http_info)
-            )
+            result = {
+                "hostname": hostname,
+                "dns_records": records,
+                "http": http_info
+            }
+
+            found.append(result)
 
             print(f"\n[+] {hostname}")
 
-            for record_type, value in records:
+            for record in records:
                 record_count += 1
 
                 print(
-                    f"    {record_type:<6} -> {value}"
+                    f"    {record['type']:<6} "
+                    f"-> {record['value']}"
                 )
 
             if http_info:
-                http_count += 1
+                web_count += 1
 
                 print(
                     f"    HTTP   -> "
@@ -222,37 +241,48 @@ def find_subdomains(domain, wordlist, workers):
 
             else:
                 print(
-                    "    HTTP   -> No web service detected"
+                    "    HTTP   -> "
+                    "No web service detected"
                 )
 
     print("\n[*] Scan complete")
     print(
-        f"[*] Subdomains found: {len(found)}"
+        f"[*] Subdomains found: "
+        f"{len(found)}"
     )
     print(
-        f"[*] DNS records found: {record_count}"
+        f"[*] DNS records found: "
+        f"{record_count}"
     )
     print(
-        f"[*] Web services found: {http_count}"
+        f"[*] Web services found: "
+        f"{web_count}"
     )
 
     return found
 
 
-def save_results(results, output_file):
+def save_text(results, output_file):
     try:
-        with open(output_file, "w") as file:
+        with open(
+            output_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
 
-            for hostname, records, http_info in results:
+            for result in results:
 
                 file.write(
-                    f"{hostname}\n"
+                    f"{result['hostname']}\n"
                 )
 
-                for record_type, value in records:
+                for record in result["dns_records"]:
                     file.write(
-                        f"    {record_type} -> {value}\n"
+                        f"    {record['type']} "
+                        f"-> {record['value']}\n"
                     )
+
+                http_info = result["http"]
 
                 if http_info:
                     file.write(
@@ -280,12 +310,117 @@ def save_results(results, output_file):
                 file.write("\n")
 
         print(
-            f"[*] Results saved to: {output_file}"
+            f"[*] Text results saved to: "
+            f"{output_file}"
         )
 
     except OSError as error:
         print(
-            f"[-] Could not save results: {error}"
+            f"[-] Could not save results: "
+            f"{error}"
+        )
+
+
+def save_json(results, output_file):
+    try:
+        with open(
+            output_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                results,
+                file,
+                indent=4
+            )
+
+        print(
+            f"[*] JSON results saved to: "
+            f"{output_file}"
+        )
+
+    except OSError as error:
+        print(
+            f"[-] Could not save JSON: "
+            f"{error}"
+        )
+
+
+def save_csv(results, output_file):
+    try:
+        with open(
+            output_file,
+            "w",
+            newline="",
+            encoding="utf-8"
+        ) as file:
+
+            writer = csv.writer(file)
+
+            writer.writerow(
+                [
+                    "Hostname",
+                    "Record Type",
+                    "Record Value",
+                    "HTTP Status",
+                    "URL",
+                    "Title",
+                    "Server"
+                ]
+            )
+
+            for result in results:
+
+                http_info = result["http"]
+
+                http_status = (
+                    http_info["status"]
+                    if http_info
+                    else ""
+                )
+
+                url = (
+                    http_info["url"]
+                    if http_info
+                    else ""
+                )
+
+                title = (
+                    http_info["title"]
+                    if http_info
+                    else ""
+                )
+
+                server = (
+                    http_info["server"]
+                    if http_info
+                    else ""
+                )
+
+                for record in result["dns_records"]:
+
+                    writer.writerow(
+                        [
+                            result["hostname"],
+                            record["type"],
+                            record["value"],
+                            http_status,
+                            url,
+                            title,
+                            server
+                        ]
+                    )
+
+        print(
+            f"[*] CSV results saved to: "
+            f"{output_file}"
+        )
+
+    except OSError as error:
+        print(
+            f"[-] Could not save CSV: "
+            f"{error}"
         )
 
 
@@ -315,7 +450,20 @@ def main():
     parser.add_argument(
         "-o",
         "--output",
-        help="Save results to a file"
+        help=(
+            "Save human-readable results "
+            "to a file"
+        )
+    )
+
+    parser.add_argument(
+        "--json",
+        help="Save results as JSON"
+    )
+
+    parser.add_argument(
+        "--csv",
+        help="Save results as CSV"
     )
 
     parser.add_argument(
@@ -355,9 +503,21 @@ def main():
     )
 
     if args.output and results:
-        save_results(
+        save_text(
             results,
             args.output
+        )
+
+    if args.json and results:
+        save_json(
+            results,
+            args.json
+        )
+
+    if args.csv and results:
+        save_csv(
+            results,
+            args.csv
         )
 
 
