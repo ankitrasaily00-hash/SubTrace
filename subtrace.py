@@ -3,10 +3,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dns.exception
 import dns.resolver
+import requests
 
 
 WORDLIST = "subdomains.txt"
 DEFAULT_WORKERS = 10
+REQUEST_TIMEOUT = 5
 
 RECORD_TYPES = ["A", "CNAME", "MX", "NS", "TXT"]
 
@@ -20,7 +22,7 @@ BANNER = r"""
 |_____/ \__,_|_| |_|
 
       SubTrace
-  DNS Reconnaissance Tool
+  DNS + HTTP Reconnaissance Tool
 """
 
 
@@ -77,14 +79,76 @@ def resolve_dns(hostname):
     return hostname, records
 
 
+def check_http(hostname):
+    urls = [
+        f"https://{hostname}",
+        f"http://{hostname}"
+    ]
+
+    for url in urls:
+        try:
+            response = requests.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+                headers={
+                    "User-Agent": "SubTrace/6.0"
+                }
+            )
+
+            server = response.headers.get(
+                "Server",
+                "Unknown"
+            )
+
+            title = "N/A"
+
+            if response.text:
+                lower_text = response.text.lower()
+
+                start = lower_text.find("<title>")
+
+                if start != -1:
+                    end = lower_text.find(
+                        "</title>",
+                        start
+                    )
+
+                    if end != -1:
+                        title = response.text[
+                            start + 7:end
+                        ].strip()
+
+            return {
+                "url": response.url,
+                "status": response.status_code,
+                "title": title,
+                "server": server
+            }
+
+        except requests.RequestException:
+            continue
+
+    return None
+
+
 def scan_subdomain(domain, subdomain):
     hostname = f"{subdomain}.{domain}"
 
     try:
-        return resolve_dns(hostname)
+        hostname, records = resolve_dns(
+            hostname
+        )
+
+        if not records:
+            return hostname, [], None
+
+        http_info = check_http(hostname)
+
+        return hostname, records, http_info
 
     except Exception:
-        return hostname, []
+        return hostname, [], None
 
 
 def find_subdomains(domain, wordlist, workers):
@@ -92,6 +156,7 @@ def find_subdomains(domain, wordlist, workers):
 
     found = []
     record_count = 0
+    http_count = 0
 
     if not subdomains:
         return found
@@ -99,7 +164,8 @@ def find_subdomains(domain, wordlist, workers):
     print(f"[*] Target: {domain}")
     print(f"[*] Wordlist: {len(subdomains)} entries")
     print(f"[*] Workers: {workers}")
-    print(f"[*] Records: {', '.join(RECORD_TYPES)}\n")
+    print(f"[*] DNS Records: {', '.join(RECORD_TYPES)}")
+    print("[*] HTTP Detection: HTTPS + HTTP\n")
 
     with ThreadPoolExecutor(
         max_workers=workers
@@ -115,13 +181,15 @@ def find_subdomains(domain, wordlist, workers):
         ]
 
         for task in as_completed(tasks):
-            hostname, records = task.result()
+            hostname, records, http_info = (
+                task.result()
+            )
 
             if not records:
                 continue
 
             found.append(
-                (hostname, records)
+                (hostname, records, http_info)
             )
 
             print(f"\n[+] {hostname}")
@@ -133,9 +201,40 @@ def find_subdomains(domain, wordlist, workers):
                     f"    {record_type:<6} -> {value}"
                 )
 
+            if http_info:
+                http_count += 1
+
+                print(
+                    f"    HTTP   -> "
+                    f"{http_info['status']} "
+                    f"{http_info['url']}"
+                )
+
+                print(
+                    f"    Title  -> "
+                    f"{http_info['title']}"
+                )
+
+                print(
+                    f"    Server -> "
+                    f"{http_info['server']}"
+                )
+
+            else:
+                print(
+                    "    HTTP   -> No web service detected"
+                )
+
     print("\n[*] Scan complete")
-    print(f"[*] Subdomains found: {len(found)}")
-    print(f"[*] DNS records found: {record_count}")
+    print(
+        f"[*] Subdomains found: {len(found)}"
+    )
+    print(
+        f"[*] DNS records found: {record_count}"
+    )
+    print(
+        f"[*] Web services found: {http_count}"
+    )
 
     return found
 
@@ -144,16 +243,38 @@ def save_results(results, output_file):
     try:
         with open(output_file, "w") as file:
 
-            for hostname, records in results:
+            for hostname, records, http_info in results:
 
                 file.write(
                     f"{hostname}\n"
                 )
 
                 for record_type, value in records:
-
                     file.write(
                         f"    {record_type} -> {value}\n"
+                    )
+
+                if http_info:
+                    file.write(
+                        f"    HTTP -> "
+                        f"{http_info['status']} "
+                        f"{http_info['url']}\n"
+                    )
+
+                    file.write(
+                        f"    Title -> "
+                        f"{http_info['title']}\n"
+                    )
+
+                    file.write(
+                        f"    Server -> "
+                        f"{http_info['server']}\n"
+                    )
+
+                else:
+                    file.write(
+                        "    HTTP -> "
+                        "No web service detected\n"
                     )
 
                 file.write("\n")
@@ -171,8 +292,8 @@ def save_results(results, output_file):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "SubTrace - Lightweight DNS "
-            "reconnaissance tool"
+            "SubTrace - Lightweight DNS and "
+            "HTTP reconnaissance tool"
         )
     )
 
@@ -203,7 +324,7 @@ def main():
         type=int,
         default=DEFAULT_WORKERS,
         help=(
-            "Number of concurrent DNS lookups "
+            "Number of concurrent lookups "
             f"(default: {DEFAULT_WORKERS})"
         )
     )
