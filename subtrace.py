@@ -1,3 +1,4 @@
+
 import argparse
 import csv
 import json
@@ -16,11 +17,14 @@ import requests
 # SUBTRACE CONFIGURATION
 # ============================================================
 
-VERSION = "12.0.1"
+VERSION = "13.0.0"
 
 WORDLIST = "subdomains.txt"
 DEFAULT_WORKERS = 10
 REQUEST_TIMEOUT = 5
+IP_INFO_TIMEOUT = 5
+
+IP_INFO_URL = "https://ipwho.is/{}"
 
 RECORD_TYPES = [
     "A",
@@ -48,7 +52,7 @@ BANNER = r"""
 
                   DNS + HTTP RECONNAISSANCE
               ─────────────────────────────────
-                         v12.0.1
+                         v13.0.0
 """
 
 
@@ -167,7 +171,6 @@ def resolve_dns(hostname):
             )
         )
 
-    # Reverse DNS for discovered IP addresses.
     ip_addresses = [
         record["value"]
         for record in records
@@ -180,6 +183,117 @@ def resolve_dns(hostname):
         )
 
     return hostname, records
+
+
+# ============================================================
+# IP / ASN INFORMATION
+# ============================================================
+
+def get_ip_info(ip_address):
+    """Retrieve ASN and network information for an IP."""
+
+    try:
+        response = requests.get(
+            IP_INFO_URL.format(ip_address),
+            timeout=IP_INFO_TIMEOUT,
+            headers={
+                "User-Agent": f"SubTrace/{VERSION}",
+            },
+        )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+
+        if not data.get("success", False):
+            return None
+
+        connection = data.get("connection") or {}
+
+        return {
+            "ip": data.get("ip", ip_address),
+            "type": data.get("type", "N/A"),
+            "continent": data.get("continent", "N/A"),
+            "country": data.get("country", "N/A"),
+            "country_code": data.get("country_code", "N/A"),
+            "region": data.get("region", "N/A"),
+            "city": data.get("city", "N/A"),
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "asn": connection.get("asn", "N/A"),
+            "organization": connection.get(
+                "org",
+                "N/A",
+            ),
+            "isp": connection.get(
+                "isp",
+                "N/A",
+            ),
+            "domain": connection.get(
+                "domain",
+                "N/A",
+            ),
+        }
+
+    except (
+        requests.RequestException,
+        ValueError,
+    ):
+        return None
+
+    except Exception:
+        return None
+
+
+def collect_ip_addresses(results):
+    """Collect unique A and AAAA addresses."""
+
+    addresses = set()
+
+    for result in results:
+        for record in result["dns_records"]:
+            if record["type"] in ("A", "AAAA"):
+                addresses.add(record["value"])
+
+    return sorted(addresses)
+
+
+def lookup_ip_information(results, workers):
+    """Look up information for all discovered IP addresses."""
+
+    ip_addresses = collect_ip_addresses(results)
+
+    if not ip_addresses:
+        return {}
+
+    ip_info = {}
+
+    with ThreadPoolExecutor(
+        max_workers=workers
+    ) as executor:
+
+        tasks = {
+            executor.submit(
+                get_ip_info,
+                ip_address,
+            ): ip_address
+            for ip_address in ip_addresses
+        }
+
+        for task in as_completed(tasks):
+            ip_address = tasks[task]
+
+            try:
+                information = task.result()
+
+            except Exception:
+                information = None
+
+            if information:
+                ip_info[ip_address] = information
+
+    return ip_info
 
 
 # ============================================================
@@ -386,13 +500,22 @@ def scan_subdomain(
         }
 
 
-def print_result(result):
+# ============================================================
+# RESULT DISPLAY
+# ============================================================
+
+def print_result(
+    result,
+    ip_info=None,
+):
     """Print one discovered subdomain."""
 
     hostname = result["hostname"]
     records = result["dns_records"]
     http_info = result["http"]
     wildcard = result["wildcard"]
+
+    ip_info = ip_info or {}
 
     print(f"\n[+] {hostname}")
 
@@ -418,6 +541,39 @@ def print_result(result):
             print(
                 f"             Reverse of -> {source}"
             )
+
+            if source in ip_info:
+                info = ip_info[source]
+
+                print(
+                    f"             ASN        -> "
+                    f"{info['asn']}"
+                )
+
+                print(
+                    f"             Organization -> "
+                    f"{info['organization']}"
+                )
+
+                print(
+                    f"             ISP        -> "
+                    f"{info['isp']}"
+                )
+
+                print(
+                    f"             Country    -> "
+                    f"{info['country']}"
+                )
+
+                print(
+                    f"             Region     -> "
+                    f"{info['region']}"
+                )
+
+                print(
+                    f"             City       -> "
+                    f"{info['city']}"
+                )
 
     if http_info:
         print(
@@ -513,6 +669,11 @@ def find_subdomains(
         )
 
         print(
+            "[*] IP Intelligence: "
+            "Optional ASN/network lookup"
+        )
+
+        print(
             f"[*] Timeout: "
             f"{REQUEST_TIMEOUT} seconds"
         )
@@ -598,8 +759,6 @@ def find_subdomains(
                     end="\r",
                 )
 
-                print_result(result)
-
     found.sort(
         key=lambda item: item["hostname"]
     )
@@ -620,8 +779,14 @@ def find_subdomains(
 # TEXT OUTPUT
 # ============================================================
 
-def save_text(results, output_file):
+def save_text(
+    results,
+    output_file,
+    ip_info=None,
+):
     """Save results in human-readable TXT format."""
+
+    ip_info = ip_info or {}
 
     try:
         with open(
@@ -657,6 +822,39 @@ def save_text(results, output_file):
                             "        "
                             f"Reverse of -> {source}\n"
                         )
+
+                        if source in ip_info:
+                            info = ip_info[source]
+
+                            file.write(
+                                f"        ASN -> "
+                                f"{info['asn']}\n"
+                            )
+
+                            file.write(
+                                f"        Organization -> "
+                                f"{info['organization']}\n"
+                            )
+
+                            file.write(
+                                f"        ISP -> "
+                                f"{info['isp']}\n"
+                            )
+
+                            file.write(
+                                f"        Country -> "
+                                f"{info['country']}\n"
+                            )
+
+                            file.write(
+                                f"        Region -> "
+                                f"{info['region']}\n"
+                            )
+
+                            file.write(
+                                f"        City -> "
+                                f"{info['city']}\n"
+                            )
 
                 http_info = result["http"]
 
@@ -706,10 +904,21 @@ def save_text(results, output_file):
 # JSON OUTPUT
 # ============================================================
 
-def save_json(results, output_file):
+def save_json(
+    results,
+    output_file,
+    ip_info=None,
+):
     """Save results as JSON."""
 
+    ip_info = ip_info or {}
+
     try:
+        output = {
+            "results": results,
+            "ip_information": ip_info,
+        }
+
         with open(
             output_file,
             "w",
@@ -717,7 +926,7 @@ def save_json(results, output_file):
         ) as file:
 
             json.dump(
-                results,
+                output,
                 file,
                 indent=4,
             )
@@ -738,8 +947,14 @@ def save_json(results, output_file):
 # CSV OUTPUT
 # ============================================================
 
-def save_csv(results, output_file):
+def save_csv(
+    results,
+    output_file,
+    ip_info=None,
+):
     """Save results as CSV."""
+
+    ip_info = ip_info or {}
 
     try:
         with open(
@@ -758,6 +973,14 @@ def save_csv(results, output_file):
                     "Record Type",
                     "Record Value",
                     "PTR Source",
+                    "ASN",
+                    "Organization",
+                    "ISP",
+                    "Country",
+                    "Region",
+                    "City",
+                    "IP Type",
+                    "IP Domain",
                     "HTTP Status",
                     "URL",
                     "Title",
@@ -786,14 +1009,47 @@ def save_csv(results, output_file):
                     response_time = ""
 
                 for record in result["dns_records"]:
+                    source = record.get(
+                        "source",
+                        "",
+                    )
+
+                    info = ip_info.get(
+                        source,
+                        {},
+                    )
+
                     writer.writerow(
                         [
                             result["hostname"],
                             result["wildcard"],
                             record["type"],
                             record["value"],
-                            record.get(
-                                "source",
+                            source,
+                            info.get("asn", ""),
+                            info.get(
+                                "organization",
+                                "",
+                            ),
+                            info.get("isp", ""),
+                            info.get(
+                                "country",
+                                "",
+                            ),
+                            info.get(
+                                "region",
+                                "",
+                            ),
+                            info.get(
+                                "city",
+                                "",
+                            ),
+                            info.get(
+                                "type",
+                                "",
+                            ),
+                            info.get(
+                                "domain",
                                 "",
                             ),
                             status,
@@ -820,8 +1076,13 @@ def save_csv(results, output_file):
 # SUMMARY
 # ============================================================
 
-def print_summary(scan_data):
+def print_summary(
+    scan_data,
+    ip_info=None,
+):
     """Print final scan statistics."""
+
+    ip_info = ip_info or {}
 
     print("\n[*] Scan complete")
 
@@ -859,6 +1120,12 @@ def print_summary(scan_data):
         f"    Wildcard    : "
         f"{scan_data['wildcard_count']}"
     )
+
+    if ip_info:
+        print(
+            f"    IP Info     : "
+            f"{len(ip_info)} IPs"
+        )
 
 
 # ============================================================
@@ -944,6 +1211,16 @@ def main():
     )
 
     parser.add_argument(
+        "--ip-info",
+        action="store_true",
+        help=(
+            "Lookup ASN, organization, ISP, "
+            "country and network information "
+            "for discovered IP addresses"
+        ),
+    )
+
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -985,24 +1262,55 @@ def main():
         args.quiet,
     )
 
-    print_summary(scan_data)
+    ip_info = {}
+
+    if args.ip_info and scan_data["results"]:
+        if not args.quiet:
+            print(
+                "\n[*] Collecting IP intelligence..."
+            )
+
+        ip_info = lookup_ip_information(
+            scan_data["results"],
+            args.threads,
+        )
+
+        if not args.quiet:
+            print(
+                f"[*] IP intelligence collected: "
+                f"{len(ip_info)} IPs"
+            )
+
+            for result in scan_data["results"]:
+                print_result(
+                    result,
+                    ip_info,
+                )
+
+    print_summary(
+        scan_data,
+        ip_info,
+    )
 
     if args.output:
         save_text(
             scan_data["results"],
             args.output,
+            ip_info,
         )
 
     if args.json:
         save_json(
             scan_data["results"],
             args.json,
+            ip_info,
         )
 
     if args.csv:
         save_csv(
             scan_data["results"],
             args.csv,
+            ip_info,
         )
 
     if not scan_data["results"]:
@@ -1017,3 +1325,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
