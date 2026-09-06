@@ -1,4 +1,3 @@
-
 import argparse
 import csv
 import json
@@ -35,16 +34,21 @@ RECORD_TYPES = [
 ]
 
 
-BANNER = r"""
-  _____       _ _____
- / ____|     | |  _  |
-| (___  _   _| | | | |
- \___ \| | | | | | | |
- ____) | |_| | | | | |
-|_____/ \__,_|_| |_|
+# ============================================================
+# BANNER
+# ============================================================
 
-       SubTrace
-DNS + HTTP Reconnaissance Tool
+BANNER = r"""
+ ███████╗██╗   ██╗██████╗ ████████╗██████╗  █████╗  ██████╗███████╗
+ ██╔════╝██║   ██║██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
+ ███████╗██║   ██║██████╔╝   ██║   ██████╔╝███████║██║     █████╗
+ ╚════██║██║   ██║██╔══██╗   ██║   ██╔══██╗██╔══██║██║     ██╔══╝
+ ███████║╚██████╔╝██████╔╝   ██║   ██║  ██║██║  ██║╚██████╗███████╗
+ ╚══════╝ ╚═════╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
+
+                  DNS + HTTP RECONNAISSANCE
+              ─────────────────────────────────
+                         v12.0.1
 """
 
 
@@ -53,7 +57,7 @@ DNS + HTTP Reconnaissance Tool
 # ============================================================
 
 def load_subdomains(wordlist):
-    """Load subdomain prefixes from the wordlist."""
+    """Load unique subdomain prefixes from a wordlist."""
 
     try:
         with open(wordlist, "r", encoding="utf-8") as file:
@@ -89,14 +93,14 @@ def resolve_record(hostname, record_type):
     try:
         answers = dns.resolver.resolve(
             hostname,
-            record_type
+            record_type,
         )
 
         for answer in answers:
             records.append(
                 {
                     "type": record_type,
-                    "value": str(answer)
+                    "value": str(answer),
                 }
             )
 
@@ -120,13 +124,11 @@ def resolve_ptr(ip_address):
     records = []
 
     try:
-        reverse_name = dns.reversename.from_address(
-            ip_address
-        )
+        reverse_name = dns.reversename.from_address(ip_address)
 
         answers = dns.resolver.resolve(
             reverse_name,
-            "PTR"
+            "PTR",
         )
 
         for answer in answers:
@@ -134,7 +136,7 @@ def resolve_ptr(ip_address):
                 {
                     "type": "PTR",
                     "value": str(answer),
-                    "source": ip_address
+                    "source": ip_address,
                 }
             )
 
@@ -161,11 +163,11 @@ def resolve_dns(hostname):
         records.extend(
             resolve_record(
                 hostname,
-                record_type
+                record_type,
             )
         )
 
-    # Reverse DNS for discovered IPv4 and IPv6 addresses.
+    # Reverse DNS for discovered IP addresses.
     ip_addresses = [
         record["value"]
         for record in records
@@ -192,7 +194,7 @@ def resolve_a_records(hostname):
     try:
         answers = dns.resolver.resolve(
             hostname,
-            "A"
+            "A",
         )
 
         for answer in answers:
@@ -212,7 +214,7 @@ def generate_random_hostname(domain):
     suffix = re.sub(
         r"[^a-z0-9]",
         "",
-        timestamp.lower()
+        timestamp.lower(),
     )
 
     return f"subtrace-{suffix}.{domain}"
@@ -275,7 +277,7 @@ def extract_title(text):
     match = re.search(
         r"<title[^>]*>(.*?)</title>",
         text,
-        re.IGNORECASE | re.DOTALL
+        re.IGNORECASE | re.DOTALL,
     )
 
     if not match:
@@ -284,7 +286,7 @@ def extract_title(text):
     title = re.sub(
         r"\s+",
         " ",
-        match.group(1)
+        match.group(1),
     ).strip()
 
     return title if title else "N/A"
@@ -307,8 +309,8 @@ def check_http(hostname):
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 headers={
-                    "User-Agent": f"SubTrace/{VERSION}"
-                }
+                    "User-Agent": f"SubTrace/{VERSION}",
+                },
             )
 
             response_time = (
@@ -323,11 +325,11 @@ def check_http(hostname):
                 ),
                 "server": response.headers.get(
                     "Server",
-                    "Unknown"
+                    "Unknown",
                 ),
                 "response_time": round(
                     response_time,
-                    3
+                    3,
                 ),
             }
 
@@ -344,16 +346,14 @@ def check_http(hostname):
 def scan_subdomain(
     domain,
     subdomain,
-    wildcard_addresses
+    wildcard_addresses,
 ):
     """Resolve DNS and check HTTP for one subdomain."""
 
     hostname = f"{subdomain}.{domain}"
 
     try:
-        hostname, records = resolve_dns(
-            hostname
-        )
+        hostname, records = resolve_dns(hostname)
 
         if not records:
             return {
@@ -365,12 +365,10 @@ def scan_subdomain(
 
         wildcard = is_wildcard_match(
             records,
-            wildcard_addresses
+            wildcard_addresses,
         )
 
-        http_info = check_http(
-            hostname
-        )
+        http_info = check_http(hostname)
 
         return {
             "hostname": hostname,
@@ -414,7 +412,7 @@ def print_result(result):
         if record_type == "PTR":
             source = record.get(
                 "source",
-                "Unknown"
+                "Unknown",
             )
 
             print(
@@ -458,13 +456,11 @@ def find_subdomains(
     domain,
     wordlist,
     workers,
-    quiet=False
+    quiet=False,
 ):
     """Scan subdomains concurrently."""
 
-    subdomains = load_subdomains(
-        wordlist
-    )
+    subdomains = load_subdomains(wordlist)
 
     found = []
 
@@ -487,9 +483,7 @@ def find_subdomains(
             "wildcard_addresses": [],
         }
 
-    wildcard_addresses = detect_wildcard_dns(
-        domain
-    )
+    wildcard_addresses = detect_wildcard_dns(domain)
 
     if not quiet:
         print(f"[*] Target: {domain}")
@@ -549,7 +543,7 @@ def find_subdomains(
                 scan_subdomain,
                 domain,
                 subdomain,
-                wildcard_addresses
+                wildcard_addresses,
             )
             for subdomain in subdomains
         ]
@@ -567,7 +561,7 @@ def find_subdomains(
                 print(
                     f"[*] Progress: "
                     f"{completed}/{total}",
-                    end="\r"
+                    end="\r",
                 )
 
             if not result["dns_records"]:
@@ -601,12 +595,10 @@ def find_subdomains(
             if not quiet:
                 print(
                     " " * 70,
-                    end="\r"
+                    end="\r",
                 )
 
-                print_result(
-                    result
-                )
+                print_result(result)
 
     found.sort(
         key=lambda item: item["hostname"]
@@ -628,21 +620,17 @@ def find_subdomains(
 # TEXT OUTPUT
 # ============================================================
 
-def save_text(
-    results,
-    output_file
-):
+def save_text(results, output_file):
     """Save results in human-readable TXT format."""
 
     try:
         with open(
             output_file,
             "w",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
 
             for result in results:
-
                 file.write(
                     f"{result['hostname']}\n"
                 )
@@ -654,7 +642,6 @@ def save_text(
                     )
 
                 for record in result["dns_records"]:
-
                     file.write(
                         f"    {record['type']} "
                         f"-> {record['value']}\n"
@@ -663,13 +650,12 @@ def save_text(
                     if record["type"] == "PTR":
                         source = record.get(
                             "source",
-                            "Unknown"
+                            "Unknown",
                         )
 
                         file.write(
-                            f"        "
-                            f"Reverse of -> "
-                            f"{source}\n"
+                            "        "
+                            f"Reverse of -> {source}\n"
                         )
 
                 http_info = result["http"]
@@ -720,23 +706,20 @@ def save_text(
 # JSON OUTPUT
 # ============================================================
 
-def save_json(
-    results,
-    output_file
-):
+def save_json(results, output_file):
     """Save results as JSON."""
 
     try:
         with open(
             output_file,
             "w",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
 
             json.dump(
                 results,
                 file,
-                indent=4
+                indent=4,
             )
 
         print(
@@ -755,10 +738,7 @@ def save_json(
 # CSV OUTPUT
 # ============================================================
 
-def save_csv(
-    results,
-    output_file
-):
+def save_csv(results, output_file):
     """Save results as CSV."""
 
     try:
@@ -766,7 +746,7 @@ def save_csv(
             output_file,
             "w",
             newline="",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
 
             writer = csv.writer(file)
@@ -787,7 +767,6 @@ def save_csv(
             )
 
             for result in results:
-
                 http_info = result["http"]
 
                 if http_info:
@@ -807,7 +786,6 @@ def save_csv(
                     response_time = ""
 
                 for record in result["dns_records"]:
-
                     writer.writerow(
                         [
                             result["hostname"],
@@ -816,7 +794,7 @@ def save_csv(
                             record["value"],
                             record.get(
                                 "source",
-                                ""
+                                "",
                             ),
                             status,
                             url,
@@ -896,7 +874,7 @@ def clean_domain(domain):
         r"^https?://",
         "",
         domain,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
 
     domain = domain.split("/")[0]
@@ -922,7 +900,7 @@ def main():
 
     parser.add_argument(
         "domain",
-        help="Target domain"
+        help="Target domain",
     )
 
     parser.add_argument(
@@ -932,7 +910,7 @@ def main():
         help=(
             f"Subdomain wordlist "
             f"(default: {WORDLIST})"
-        )
+        ),
     )
 
     parser.add_argument(
@@ -941,17 +919,17 @@ def main():
         help=(
             "Save human-readable results "
             "to a file"
-        )
+        ),
     )
 
     parser.add_argument(
         "--json",
-        help="Save results as JSON"
+        help="Save results as JSON",
     )
 
     parser.add_argument(
         "--csv",
-        help="Save results as CSV"
+        help="Save results as CSV",
     )
 
     parser.add_argument(
@@ -962,20 +940,20 @@ def main():
         help=(
             "Number of concurrent lookups "
             f"(default: {DEFAULT_WORKERS})"
-        )
+        ),
     )
 
     parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
-        help="Show only the final summary"
+        help="Show only the final summary",
     )
 
     parser.add_argument(
         "--version",
         action="version",
-        version=f"SubTrace {VERSION}"
+        version=f"SubTrace {VERSION}",
     )
 
     args = parser.parse_args()
@@ -985,9 +963,7 @@ def main():
             "threads must be at least 1"
         )
 
-    domain = clean_domain(
-        args.domain
-    )
+    domain = clean_domain(args.domain)
 
     if not domain:
         parser.error(
@@ -1006,29 +982,27 @@ def main():
         domain,
         args.wordlist,
         args.threads,
-        args.quiet
+        args.quiet,
     )
 
-    print_summary(
-        scan_data
-    )
+    print_summary(scan_data)
 
     if args.output:
         save_text(
             scan_data["results"],
-            args.output
+            args.output,
         )
 
     if args.json:
         save_json(
             scan_data["results"],
-            args.json
+            args.json,
         )
 
     if args.csv:
         save_csv(
             scan_data["results"],
-            args.csv
+            args.csv,
         )
 
     if not scan_data["results"]:
@@ -1043,4 +1017,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
